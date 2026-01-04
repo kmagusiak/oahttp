@@ -1,21 +1,43 @@
 [build-system]
 requires = [
-    "setuptools>=61",
+    "setuptools>=70",
     #"setuptools-scm>=6",
 ]
 build-backend = "setuptools.build_meta"
+
+[tools.setuptools]
+packages = ["oahttp"]
+
+[tool.setuptools_scm]
+local_scheme = "no-local-version"
 
 [project]
 name = "oahttp"
 # dynamic = ["version"]
 version = "0.0.1"
+description = "Simple origin async HTTP origin server"
 requires-python = ">=3.12"
-dependencies = []
+classifiers = [
+    # https://pypi.org/pypi?%3Aaction=list_classifiers
+    "Programming Language :: Python :: 3",
+]
 
 [project.optional-dependencies]
+dev = [
+    "mypy~=1.19",
+    "ruff==0.14.10",
+    "uvloop==0.22.1",
+]
 test = [
     "pytest",
 ]
+
+[project.urls]
+Homepage = "https://github.com/kmagusiak/oahttp"
+
+[[project.authors]]
+name = "Krzysztof Magusiak"
+email = "chris.magusiak@gmail.com"
 
 [tool.black]
 line-length = 100
@@ -25,5 +47,53 @@ skip-string-normalization = 1
 profile = "black"
 line_length = 100
 
-[tool.setuptools_scm]
-local_scheme = "no-local-version"
+[tool.mypy]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.format]
+quote-style="preserve"
+
+[tool.ruff.lint]
+# https://beta.ruff.rs/docs/rules/
+select = [
+    "C4",   # flake8 comprehensions
+    #"C9",  # mccabe
+    "COM",  # flake8 commas
+    #"D",   # pydocstyle, pydoclint
+    "E",    # pycodestyle
+    "EXE",  # flake8-executable
+    "F",    # pyflakes
+    "I",    # isort
+    "LOG",  # flake8 logging
+    "N",    # naming
+    "PLE",  # pylint errors
+    "RET",  # flake8 return
+    "RUF",  # ruff specific
+    "SIM",  # flake8 simplify
+    "TID",  # flake8 tidy imports
+    "UP",   # pyupdate
+    "W",    # pycodestyle
+    # specific rules
+    "FIX003" # comments with XXX should become TODO or FIXME
+]
+ignore = [
+    "COM812", # trailing commas (because we use the ruff formatter)
+    "D102",  # mission doc in public method, function
+    "D205",  # blank line required between summary and description
+    "D400",  # first line should end with a period
+    "E731",  # don't assign lambda
+    "N818",  # exception should be named with an Error suffix
+    "SIM105",  # use contextlib.suppress
+    "SIM108",  # simplify ITE by operator
+    "SIM300",  # yoda condition
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
