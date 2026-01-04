@@ -1,0 +1,57 @@
+#!/bin/bash
+set -eu
+# Check directory
+cd "$(dirname "$0")"
+[ -d .git ] || cd ../..
+[ -d .git ]
+
+check() {
+	echo " ruff:"
+	ruff check
+	ruff format --check
+}
+
+lint() {
+	check
+	echo " mypy:"
+	mypy .
+}
+
+fix() {
+	ruff check --fix-only .
+}
+
+format() {
+	ruff format
+}
+
+# Commands
+case "${1:-run}" in
+	run|check)
+		check
+		echo " all good to commit."
+		;;
+	lint)
+		lint
+		;;
+	fix)
+		echo "Fix all..."
+		fix
+		format
+		;;
+	format)
+		format
+		;;
+	install)
+		echo "Installing pre-commit"
+		cd .git/hooks
+		ln -sf ../../pre-commit pre-commit
+		;;
+	uninstall)
+		echo "Uninstalling pre-commit"
+		rm -f .git/hooks/pre-commit
+		;;
+	*)
+		echo "Invalid argument: $*"
+		echo "Supported options: lint, fix, format, install, uninstall"
+esac

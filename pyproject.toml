@@ -1,0 +1,29 @@
+[build-system]
+requires = [
+    "setuptools>=61",
+    #"setuptools-scm>=6",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oahttp"
+# dynamic = ["version"]
+version = "0.0.1"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+
+[tool.black]
+line-length = 100
+skip-string-normalization = 1
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.setuptools_scm]
+local_scheme = "no-local-version"
