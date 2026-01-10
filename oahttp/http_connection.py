@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import typing
 
 from . import _logger, config
@@ -92,6 +93,8 @@ class HttpConnection(asyncio.BufferedProtocol):
                 return
             self.transport.close()
             return
+        except Exception:
+            _logger.exception("receive")
         if buffer.full:
             if not request.ready:
                 # buffer full, header not parsed
@@ -109,25 +112,21 @@ class HttpConnection(asyncio.BufferedProtocol):
                 not (connection := request.headers.get(b'connection'))
                 or connection.lower() == b'keep-alive'
             )
-        loop = asyncio.get_running_loop()
-        eager = asyncio.eager_task_factory
         expect_body = not request.body.ready
         context = request.context
         try:
-            dispatch: asyncio.Future[Response] = eager(
-                loop, self.strategy.dispatcher(request), context=context
-            )
+            dispatch = context.run(self.strategy.route, request)
         except Exception as e:
             from .response import Response
 
             if isinstance(e, Response):
                 expect_body = False
-                dispatch = asyncio.Future()
-                dispatch.set_result(e)
+                exc = e
+                dispatch = lambda: exc
             else:
                 self.abort(self.strategy.wrap_error(self.request, e))
                 return
-        try:
+        if True:
             if expect := request.headers.get(b'expect') and request.http_version == b'1.1':
                 from .response import ContinueResponse, ExpecationFailed
 
@@ -137,34 +136,15 @@ class HttpConnection(asyncio.BufferedProtocol):
                 if expect_body:
                     ContinueResponse().send_immediately(request, self.transport)
 
-            self.__process_task = eager(loop, self._response_callback(dispatch), context=context)
-            self.__process_task.add_done_callback(self._prepare_next)
-        except BaseException:
-            dispatch.cancel()
-            raise
-
-    async def _response_callback(self, task: asyncio.Future[Response]):
-        # wait until previous request is flushed
-        write_throttle = self.__write_allowed.wait
-        await write_throttle()
-
         try:
-            if task.done():
-                response = task.result()
-            else:
-                async with asyncio.timeout(config.TIMEOUT_PROCESS):
-                    response = await task
+            response = context.run(dispatch)
         except Exception as ex:
             response = self.strategy.wrap_error(ex)
 
         _logger.debug("%s: response ready", self)
         request = self.request
         transport = self.transport
-        await response.send(request, transport, write_throttle)
-
-        if self.keep_alive and not request.body.ready:
-            _logger.debug("%s: wait reminder of body", self)
-            await request.body.wait()
+        response.send_sync(request, transport)
 
         if self.request.headers.get(b'connection') == b'upgrade':
             from .response import UpgradeRequired, UpgradeResponse
@@ -187,13 +167,9 @@ class HttpConnection(asyncio.BufferedProtocol):
                 _logger.warning("%s: invalid response to connection upgrade header", self)
                 self.keep_alive = False
 
-    def _prepare_next(self, task: asyncio.Task):
-        try:
-            task.result()
-        except Exception as e:
-            _logger.exception(str(e))
-            self.transport.abort()
-            return
+        self._prepare_next()
+
+    def _prepare_next(self):
         if self.keep_alive:
             _logger.debug("%s: prepare next", self)
             self.request = None
@@ -216,3 +192,75 @@ class HttpConnection(asyncio.BufferedProtocol):
 
     def __repr__(self):
         return f"HTTP{id(self)}"
+
+
+class SyncTransport(asyncio.Transport):
+    def __init__(self, socket: socket.socket, extra=None):
+        self.socket = socket
+        self.protocol = None
+        self.state: typing.Literal['init', 'running', 'closing', 'closed'] = 'init'
+        super().__init__(extra)
+
+    def is_closing(self):
+        return self.state == 'closing'
+
+    def close(self):
+        if self.state in ('closing', 'closed'):
+            return
+        self.state = 'closing'
+        self.socket.shutdown(socket.SHUT_RDWR)
+
+    def abort(self):
+        if self.state == 'closed':
+            return
+        self.socket.close()
+        self.state = 'closed'
+
+    def get_protocol(self):
+        return self.protocol
+
+    def set_protocol(self, protocol):
+        self.protocol = protocol
+
+    def is_reading(self):
+        return False
+
+    def pause_reading(self):
+        pass
+
+    def resume_reading(self):
+        pass
+
+    def write(self, data):
+        self.socket.sendall(data)
+
+    def can_write_eof(self):
+        return self.state == 'running'
+
+    def write_eof(self):
+        self.socket.shutdown(socket.SHUT_WR)
+
+    def run(self):
+        sock = self.socket
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        assert self.state == 'init'
+        self.state == 'running'
+        self.protocol.connection_made(self)
+
+        try:
+            while True:
+                protocol: asyncio.BufferedProtocol = self.protocol  # TODO ignore type
+                buffer = protocol.get_buffer()
+                nbytes = sock.recv_into(buffer)
+                if not nbytes:
+                    if not protocol.eof_received():
+                        self.close()
+                    break
+                protocol.buffer_updated(nbytes)
+        except Exception as e:
+            self.protocol.connection_lost(e)
+        else:
+            self.protocol.connection_lost()
+        finally:
+            self.state = 'closed'
+            self.socket.close()

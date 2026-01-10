@@ -76,6 +76,12 @@ class Response:
         loop = asyncio.get_running_loop()
         loop.run_until_complete(loop.create_task(self.send(request, transport, no_wait)))
 
+    def send_sync(self, request: Request, transport: asyncio.WriteTransport):
+        self._for_request(request)
+        self.body.set_headers(self.headers)
+        transport.write(self._generate_header())
+        self.body.send_sync(transport)
+
     def _generate_header(self):
         assert self.http_version
         if config.STRICTER:
@@ -269,12 +275,18 @@ class ResponseBody:
     async def send(self, transport: asyncio.WriteTransport, throttle: Callable[[], Coroutine]):
         raise NotImplementedError
 
+    def send_sync(self, transport: asyncio.WriteTransport):
+        raise NotImplementedError
+
 
 class EmptyResponseBody(ResponseBody):
     def set_headers(self, headers: dict):
         assert b'content-length' not in headers
 
     async def send(self, transport, throttle):
+        pass
+
+    def send_sync(self, transport):
         pass
 
 
@@ -290,6 +302,9 @@ class StaticBody(ResponseBody):
         if self.__body:
             await throttle()
             transport.write(self.__body)
+
+    def send_sync(self, transport):
+        transport.write(self.__body)
 
 
 class FileBody(ResponseBody):
@@ -308,6 +323,12 @@ class FileBody(ResponseBody):
         fd = self.__fd
         fd.seek(0)
         await loop.sendfile(transport, fd)
+
+    def send_sync(self, transport):
+        fd = self.__fd
+        fd.seek(0)
+        while data := fd.read():
+            transport.write(data)
 
     def __del__(self):
         self.__fd.close()

@@ -18,20 +18,25 @@ from .response import (
 from .session import Session
 
 Dispatcher = Callable[[Request], Coroutine[typing.Any, typing.Any, Response]]
+Route = Callable[[Request], Callable[[], Response]]
 
 
 async def default_dispatcher(request: Request) -> Response:
+    return default_route(request)()
+
+
+def default_route(request: Request) -> Response:
     if request.method == 'OPTIONS' and request.target == '*':
         response = Ok(None)
         response.headers[b'allow'] = b'GET, HEAD, OPTIONS'
-        return response
+        return lambda: response
 
     if request.method == 'TRACE':
         if not config.TRACE_METHOD_ENABLED:
             raise NotImplementedError("TRACE not implemented")
         response = Ok(request)  # TODO serialize request
         response.headers['content-type'] = b'message/http'
-        return response
+        return lambda: response
 
     raise NotFound
 
@@ -39,6 +44,7 @@ async def default_dispatcher(request: Request) -> Response:
 class HttpStrategy:
     dispatcher: Dispatcher = staticmethod(default_dispatcher)
     debug = False  # TODO use this instead of global config?
+    route: Route = staticmethod(default_route)
 
     def session(self, sid) -> Session: ...
 

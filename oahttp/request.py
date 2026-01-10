@@ -192,7 +192,7 @@ class RequestBody:
     size: int
 
     def receive_data(self, buf: ReadBuffer):
-        raise NotImplementedError
+        pass
 
     def receive_paused(self, resume_callback):
         assert not self.ready
