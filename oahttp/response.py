@@ -31,9 +31,9 @@ class Response:
             b'date': format_date_time(datetime.datetime.now()),
             b'server': config.ORIGIN,
         }
-        self.content = content
-        self.body = None
         self.set_cookies: dict[str, Cookie] = {}
+        self.content = content
+        self.body: ResponseBody | None = None
 
     def set_header(self, key: bytes, value: str | bytes) -> None:
         assert key != b'set-cookie', "use Response.set_cookies directly"
@@ -48,20 +48,15 @@ class Response:
         assert request.ready, "Request is not ready"
         assert not self.ready, "Response is already generated"
         self.http_version = request.http_version
-        # TODO check content-type
-        match self.content:
-            case None | '' | b'':
-                body = EmptyResponseBody()
-            case ResponseBody() as body:
-                pass
-            case Buffer() as content:
-                if content:
-                    body = StaticBody(content)
-                else:
-                    body = EmptyResponseBody()
-            case content:
-                body = request.serialize_response(content)
-        self.body = body
+        content = self.content
+        if not self.content:
+            self.body = EmptyResponseBody()
+        elif isinstance(content, ResponseBody):
+            self.body = content
+        elif isinstance(content, Buffer):
+            self.body = StaticBody(content)
+        else:
+            self.body = request.serialize_response(content)
 
     @property
     def ready(self):
@@ -126,7 +121,7 @@ class GenericResponse(Response):
         self.status = status
         super().__init__(body)
         if body is not None:
-            self.headers.setdefault(b'content-type', content_type)
+            self.headers[b'content-type'] = content_type
 
 
 class ServerErrorResponse(Response):
@@ -136,21 +131,16 @@ class ServerErrorResponse(Response):
         status = cls.status
         assert 500 <= int(status[:2].decode()) <= 599
 
-    def __init__(self, exception: Exception, *, headers=None):
-        super().__init__(exception, headers=headers)
+    def __init__(self, exception: Exception):
+        super().__init__(exception)
         if isinstance(exception, NotImplementedError):
             self.status = b'501 Not Implemented'
         elif self.headers.get(b'retry-after'):
             self.status = b'503 Service Unavailable'
 
-    def _for_request(self, request):
-        # TODO set the body
-        # self.body = StaticBody(str(self.exception).encode())
-        return super()._for_request(request)
 
-
-class RedirectResponse(GenericResponse):
-    def __init__(self, location: bytes, *, permanent=False, can_change_method=False, headers=None):
+class RedirectResponse(Response):
+    def __init__(self, location: bytes, *, permanent=False, can_change_method=False):
         if can_change_method:
             if permanent:
                 status = b'301 Moved Permanently'
@@ -162,15 +152,16 @@ class RedirectResponse(GenericResponse):
                 status = b'308 Permanent Redirect'
             else:
                 status = b'307 Temporary Redirect'
-        super().__init__(status=status, headers=headers)
+        self.status = status
+        super().__init__()
         self.headers[b'location'] = location
 
 
 class Ok(Response):
     status = b'200 OK'
 
-    def __init__(self, content, *, headers=None):
-        super().__init__(content, headers=headers)
+    def __init__(self, content):
+        super().__init__(content)
         if content is None:
             self.status = b'204 No Content'
 
@@ -178,8 +169,8 @@ class Ok(Response):
 class Created(Response):
     status = b'201 Created'
 
-    def __init__(self, body=None, *, headers=None):
-        super().__init__(body, headers=headers)
+    def __init__(self, content=None):
+        super().__init__(content)
         if self.headers.get(b'location'):  # maybe
             self.status = b'303 See Other'
 
@@ -206,7 +197,7 @@ class Forbidden(ClientErrorResponse):
 class NotFound(ClientErrorResponse):
     status = b'404 Not Found'
 
-    def __init__(self, content=None, *, gone=False):
+    def __init__(self, content=None, *, gone: bool = False):
         if gone:
             # permanently deleted
             self.status = b'410 Gone'
@@ -216,11 +207,11 @@ class NotFound(ClientErrorResponse):
 class MethodNotAllowed(ClientErrorResponse):
     status = b'405 Method Not Allowed'
 
-    def __init__(self, method: bytes, allowed: list[bytes]):
+    def __init__(self, method: str, allowed: list[str]):
         super().__init__(f"Method {method} not allowed")
         assert method not in allowed
         self.allowed = allowed
-        self.headers[b'allow'] = b', '.join(self.allowed)
+        self.headers[b'allow'] = ', '.join(self.allowed).encode()
 
 
 class NotAcceptable(ClientErrorResponse):
@@ -241,16 +232,12 @@ class UnsupportedMediaType(ClientErrorResponse):
 class ExpecationFailed(ClientErrorResponse):
     status = b'417 Expectation Failed'
 
-    # for the expect header
-    def __init__(self):
-        super().__init__()
-
 
 class UpgradeRequired(ClientErrorResponse):
     status = b'426 Upgrade Required'
 
-    def __init__(self, body=None, *, acceptable: bytes, headers=None):
-        super().__init__(body, status=426, headers=headers)
+    def __init__(self, content=None, *, acceptable: bytes):
+        super().__init__(content)
         self.headers[b'upgrade'] = acceptable
 
 
