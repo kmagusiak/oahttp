@@ -144,6 +144,7 @@ class HttpConnection(asyncio.BufferedProtocol):
             raise
 
     async def _response_callback(self, task: asyncio.Future[Response]):
+        request = self.request
         # wait until previous request is flushed
         write_throttle = self.__write_allowed.wait
         await write_throttle()
@@ -155,10 +156,9 @@ class HttpConnection(asyncio.BufferedProtocol):
                 async with asyncio.timeout(config.TIMEOUT_PROCESS):
                     response = await task
         except Exception as ex:
-            response = self.strategy.wrap_error(ex)
+            response = self.strategy.wrap_error(request, ex)
 
         _logger.debug("%s: response ready", self)
-        request = self.request
         transport = self.transport
         await response.send(request, transport, write_throttle)
 

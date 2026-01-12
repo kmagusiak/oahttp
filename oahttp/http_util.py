@@ -5,6 +5,7 @@ import datetime
 import email.message
 import email.utils
 import fnmatch
+import mimetypes
 import re
 
 # TODO transfer-encoding
@@ -37,6 +38,25 @@ def format_date_time(dt: datetime.datetime) -> bytes:
 def parse_date_time(val: bytes) -> datetime.datetime:
     # https://www.rfc-editor.org/rfc/rfc9110#name-date-time-formats
     raise NotImplementedError
+
+
+def guess_mimetype(path_or_bytes: str | memoryview) -> str | None:
+    if isinstance(path_or_bytes, str):
+        mime, _encoding = mimetypes.guess_file_type(path_or_bytes)
+    else:
+        # guess from data
+        data = bytes(path_or_bytes[:4096])
+        try:
+            text = data.decode()
+        except UnicodeDecodeError:
+            pass
+        else:
+            if text.translate(str.maketrans('', '', '\r\n\t')).isprintable():
+                if text.lstrip()[:1] == '<':
+                    return 'text/html'
+                return 'text/plain'
+
+    return mime
 
 
 class MultiValuePreference:

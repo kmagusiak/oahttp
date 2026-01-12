@@ -95,6 +95,7 @@ class Request:
     def _set_header(self, key: bytes, value: bytes):
         key = key.lower()
         if key == b'cookie':
+            # TODO harden
             for cookie_pair in value.split(b';'):
                 cookie_name, _eq, cookie_value = cookie_pair.partition(b'=')
                 self.cookies[cookie_name] = cookie_value
@@ -138,6 +139,8 @@ class Request:
         if parts.pop():
             # invalid path
             parts.clear()  # raise 400 bad request
+        elif len(parts) == 1 and not parts[0]:
+            parts.clear()  # the path is just "/"
         return parts
 
     @functools.cached_property
@@ -217,6 +220,9 @@ class NoRequestBody(RequestBody):
 
     def __bool__(self):
         return False
+
+    def receive_data(self, buf):
+        pass
 
 
 _EMPTY_BODY = NoRequestBody()

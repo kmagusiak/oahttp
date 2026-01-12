@@ -5,7 +5,7 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
-[tools.setuptools]
+[tool.setuptools]
 packages = ["oahttp"]
 
 [tool.setuptools_scm]
@@ -26,10 +26,12 @@ classifiers = [
 dev = [
     "mypy~=1.19",
     "ruff==0.14.10",
-    "uvloop==0.22.1",
 ]
 test = [
     "pytest",
+]
+uvloop = [
+    "uvloop==0.22.1",
 ]
 
 [project.urls]

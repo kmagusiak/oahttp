@@ -8,7 +8,7 @@ import typing
 from collections.abc import Buffer
 
 from . import config
-from .http_util import Cookie, format_date_time
+from .http_util import Cookie, format_date_time, guess_mimetype
 
 if typing.TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine
@@ -283,7 +283,10 @@ class StaticBody(ResponseBody):
         self.__body = body if isinstance(body, bytes) else memoryview(body)
 
     def set_headers(self, headers: dict):
-        headers.setdefault(b'content-type', b'stream/octect')
+        if b'content-type' not in headers:
+            if mime := guess_mimetype(self.__body):
+                mime = mime.encode()
+            headers[b'content-type'] = mime or b'stream/octect'
         headers[b'content-length'] = str(len(self.__body)).encode()
 
     async def send(self, transport, throttle):
@@ -298,7 +301,10 @@ class FileBody(ResponseBody):
         self.__fd = fd
 
     def set_headers(self, headers: dict):
-        headers.setdefault(b'content-type', b'stream/octect')
+        if b'content-type' not in headers:
+            if isinstance(file_name := self.__fd.name, str) and (mime := guess_mimetype(file_name)):
+                mime = mime.encode()
+            headers[b'content-type'] = mime or b'stream/octect'
         stat = os.fstat(self.__fd.fileno())
         headers[b'content-length'] = str(stat.st_size).encode()
 
