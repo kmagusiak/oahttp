@@ -78,7 +78,7 @@ class Response:
 
     def _generate_header(self):
         assert self.http_version
-        if config.STRICTER:
+        if config.DEBUG:
             from .http_util import RE_HEADER, RE_TOKEN
 
             assert all(

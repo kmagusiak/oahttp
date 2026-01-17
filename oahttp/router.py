@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import functools
 import typing
+from bisect import insort_right
 from collections.abc import Callable, Coroutine
 
 from . import config
 from .http_connection import HttpConnection, Request
 from .response import (
-    ClientErrorResponse,
     FileBody,
     MethodNotAllowed,
     NotAcceptable,
@@ -19,6 +18,8 @@ from .response import (
 from .session import Session
 
 Dispatcher = Callable[[Request], Coroutine[typing.Any, typing.Any, Response]]
+
+NOT_FOUND = NotFound()
 
 
 async def default_dispatcher(request: Request) -> Response:
@@ -34,12 +35,15 @@ async def default_dispatcher(request: Request) -> Response:
         response.headers['content-type'] = b'message/http'
         return response
 
-    raise NotFound
+    return NOT_FOUND
 
 
 class HttpStrategy:
-    dispatcher: Dispatcher = staticmethod(default_dispatcher)
     debug = False  # TODO use this instead of global config?
+
+    def __init__(self):
+        self.dispatcher = MutliDispatcher()
+        self.dispatcher.add(default_dispatcher, 0.1)
 
     def session(self, sid) -> Session: ...
 
@@ -55,94 +59,133 @@ class HttpStrategy:
     def new_connection(self) -> HttpConnection:
         return HttpConnection(self)
 
+    def route(self, method: str, path: str):
+        def bind_route(func, /):
+            other = func
+            if method != '*':
+                md = MethodDispatcher()
+                md.methods[method] = other
+                other = md
 
-class Router(Dispatcher):
-    def __init__(self):
-        self._routes = {}
-        # Routes:
-        #   *by default static strings* -> Routes
-        #   /METHOD -> Dispatcher
-        #   :param: ("<"...">") -> Routes
-        #   :fallback: ("...") -> Dispatcher
-
-    def route(self, path: str, *, priority: float = 1.0):
-        """
-        :param method: Method to bind
-        :param path: Path pattern
-        """
-        parts = path.split('/')
-        parts.reverse()
-        if parts.pop():
-            raise ValueError("invalid path")
-
-        routes = self._routes
-        while parts:
-            part = parts.pop()
-            if part == '...':
-                if parts:
-                    raise ValueError("\"/...\" can only be the last element")
-                fallbacks = routes.setdefault(':fallback:', [])
-                routes = {}
-                fallbacks.append((priority, routes))
-                break
-            elif part[0] == '<':  # noqa: RET508
-                # TODO merge routes?
-                params = routes.setdefault(':param:', [])
-                routes = {}
-                params.append((priority, part, routes))
-                routes = routes
-            else:
-                route = routes.get(part)
-                if route is None:
-                    routes[part] = route = {}
-                routes = route
-
-        return self._RouterPath(routes)
-
-    class _RouterPath:
-        def __init__(self, routes):
-            self._routes = routes
-
-        def method(self, name):
-            def add_method(func):
-                self._routes['/' + name] = func
-                return func
-
-            return add_method
-
-        get = functools.partialmethod(method, 'GET')
-        post = functools.partialmethod(method, 'POST')
-        put = functools.partialmethod(method, 'PUT')
-        patch = functools.partialmethod(method, 'PATCH')
-        delete = functools.partialmethod(method, 'DELETE')
-        head = functools.partialmethod(method, 'HEAD')
-        options = functools.partialmethod(method, 'OPTIONS')
-
-        def __call__(self, func):
-            self._routes['/'] = func
+            self.dispatcher = PathDispatcher.build(self.dispatcher, path, other)
             return func
 
-    async def __dispatch(self, routes: dict, request: Request) -> Response:
-        exception = None
+        return bind_route
+
+
+class MergableDispatcher(Dispatcher):
+    def merge(self, other: Dispatcher):
+        return MutliDispatcher(self, other)
+
+
+class MutliDispatcher(MergableDispatcher):
+    def __init__(self, *dispatchers):
+        self._dispatchers = list(zip([1.0] * len(dispatchers), dispatchers))
+
+    def merge(self, other):
+        if isinstance(other, MutliDispatcher):
+            for priority, d in other._dispatchers:
+                self.add(d, priority)
+            return self
+        for i, (p, d) in enumerate(self._dispatchers):
+            if other is d:
+                return self
+            if p == 1.0 and isinstance(d, MergableDispatcher) and type(other) is type(d):
+                self._dispatchers[i] = (p, d.merge(other))
+                return self
+        self.add(other)
+        return self
+
+    @staticmethod
+    def build(dispatcher, other):
+        if isinstance(dispatcher, MergableDispatcher):
+            return dispatcher.merge(other)
+        return MutliDispatcher(dispatcher, other)
+
+    def add(self, other, priority=1.0):
+        insort_right(self._dispatchers, (priority, other), key=lambda t: -t[0])
+
+    async def __call__(self, request: Request):
+        for _p, dispatcher in self._dispatchers:
+            response = await dispatcher(request)
+            if response is not NOT_FOUND:
+                return response
+        return NOT_FOUND
+
+
+class PathDispatcher(MergableDispatcher):
+    def __init__(self):
+        self.static = {}
+        self.dynamic = []
+        self.root = None
+
+    def merge(self, other):
+        if isinstance(other, PathDispatcher):
+            for p, f in other.static.items():
+                self.static.setdefault(p, f)
+            for d in other.dynamic:
+                insort_right(self.dynamic, d, key=lambda t: -t[0])
+            other = other.root
+            if other is None:
+                return self
+        if self.root is None:
+            self.root = other
+        else:
+            self.root = MutliDispatcher.build(self.root, other)
+        return self
+
+    @staticmethod
+    def build(dispatcher, path, other):
+        path_parts = path.split('/')
+        path_parts.reverse()
+        path_parts.pop()  # remove first '/'
+        out = other
+        while path_parts:
+            part = path_parts.pop()
+            assert part
+            if part == '...':
+                break
+            d = PathDispatcher()
+            if part[0] == '<' and part[-1] == '>':
+                priority = 1
+                matcher = None
+                insort_right(
+                    d.dynamic,
+                    (priority, part[1:-1], matcher, out),
+                    key=lambda t: -t[0],
+                )
+            else:
+                d.static[part] = out
+            out = d
+        return MutliDispatcher.build(dispatcher, out)
+
+    async def __call__(self, request: Request):
         if path_parts := request._path_route:
+            part = path_parts.pop()
             try:
-                part = path_parts.pop()
-                if route := routes.get(part):
-                    try:
-                        return await self.__dispatch(route, request)
-                    except ClientErrorResponse as e:
-                        exception = e
+                if func := self.static.get(part):
+                    response = await func(request)
+                    if response is not NOT_FOUND:
+                        return response
                 if part == '.' or not part:
-                    return await self.__dispatch(routes, request)
+                    response = await func(request)
+                    if response is not NOT_FOUND:
+                        return response
                 if part == '..':
-                    raise NotFound  # path traversal
-                for _prio, param_name, routes in routes.get(':param:', ()):
+                    return NotFound()  # path traversal, stop
+
+                for _prio, param_name, matcher, func in self.dynamic:
+                    value = part
+                    if matcher is not None:
+                        value = matcher(value)
+                        if value is None:
+                            continue
                     old_value = request.path_params.get(param_name)
                     try:
-                        request.path_params[param_name] = part
-                        return await self.__dispatch(routes, request)
-                    except ClientErrorResponse as e:
-                        exception = e
+                        request.path_params[param_name] = value
+                        response = await func(request)
+                        if response is not NOT_FOUND:
+                            return response
                     finally:
                         if old_value is None:
                             request.path_params.pop(param_name, None)
@@ -150,28 +193,31 @@ class Router(Dispatcher):
                             request.path_params[param_name] = old_value
             finally:
                 path_parts.append(part)
-        else:
-            if func := routes.get('/' + request.method):
-                return await func(request)
-            if request.method == 'HEAD' and (func := routes.get('/GET')):
-                return await self.__head_fallback(request, func)
-            if func := routes.get('/'):
-                return await func(request)
-            if any(r[0] == '/' for r in routes):
-                raise MethodNotAllowed(request.method)
-        for _prio, routes in routes.get(':fallback:', ()):
-            try:
-                return await self.__dispatch(routes, request)
-            except ClientErrorResponse as e:
-                exception = e  # TODO append
-        raise exception or NotFound
+        elif func := self.root:
+            return await func(request)
+        return NOT_FOUND
 
-    async def __call__(self, request: Request) -> Response:
-        if request.target == b'*' and not request._path_route:
-            return await default_dispatcher(request)
-        return await self.__dispatch(self._routes, request)
 
-    async def __head_fallback(self, request, func):
+class MethodDispatcher(MergableDispatcher):
+    def __init__(self):
+        self.methods = {}
+
+    def merge(self, other):
+        if isinstance(other, MethodDispatcher):
+            methods = other.methods.copy()
+            methods.update(self.methods)
+            self.methods = methods
+            return self
+        return super().merge(other)
+
+    async def __call__(self, request: Request):
+        if func := self.methods.get(request.method):
+            return await func(request)
+        if request.method == 'HEAD' and (func := self.methods.get('GET')):
+            return await self.__head_fallback(request, func)
+        return MethodNotAllowed(request.method, list(self.methods))
+
+    async def __head_fallback(self, request: Request, func: Dispatcher) -> Response:
         request.method = 'GET'
         try:
             response = await func(request)
@@ -182,17 +228,25 @@ class Router(Dispatcher):
         return response
 
 
-class ContentTypeDispatcher(Dispatcher):
-    def __init__(self, default_content_type):
+class ContentTypeDispatcher(MergableDispatcher):
+    def __init__(self):
         self.content_types: dict[str, Dispatcher] = {}
+
+    def merge(self, other):
+        if isinstance(other, ContentTypeDispatcher):
+            map = other.content_types.copy()
+            map.update(self.content_types)
+            self.content_types = map
+            return self
+        return super().merge(other)
 
     async def __call__(self, request: Request):
         accept = request.accept
         # TODO get most acceptable
-        for content_type, func in self.content_types:
+        for content_type, func in self.content_types.items():
             if accept.acceptable(content_type):
                 return await func(request)
-        raise NotAcceptable
+        return NotAcceptable()
 
 
 class FileDispatcher(Dispatcher):
@@ -201,14 +255,25 @@ class FileDispatcher(Dispatcher):
 
         self.root_path = Path(root_path)
 
-    async def __call__(self, request):
+    async def __call__(self, request: Request):
         # TODO add accept-ranges header
         # TODO add x-accel-redirect
-        if request.method != b'GET':
-            raise MethodNotAllowed(request.method, [b'GET', b'HEAD'])
+        if request.method not in ('GET', 'HEAD'):
+            raise MethodNotAllowed(request.method, ['GET', 'HEAD'])
 
-        path = self.root_path / request.target.decode()
+        path = self.root_path / request.target
+        fp = None
         try:
-            return Response(FileBody(path.open('rb')))
-        except FileNotFoundError:
-            raise NotFound(path)
+            fp = path.open('rb')
+        except OSError:
+            return NOT_FOUND
+        else:
+            if request.method == 'GET':
+                body = FileBody(fp)
+                fp = None  # keep open
+            else:
+                body = None
+            return Response(body)
+        finally:
+            if fp is not None:
+                fp.close()

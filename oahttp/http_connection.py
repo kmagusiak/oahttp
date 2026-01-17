@@ -128,7 +128,11 @@ class HttpConnection(asyncio.BufferedProtocol):
                 self.abort(self.strategy.wrap_error(self.request, e))
                 return
         try:
-            if expect := request.headers.get(b'expect') and request.http_version == b'1.1':
+            if (
+                expect := request.headers.get(b'expect')
+                and request.http_version == b'1.1'
+                and not dispatch.done()
+            ):
                 from .response import ContinueResponse, ExpecationFailed
 
                 if expect != b'100-continue':

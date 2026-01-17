@@ -150,7 +150,7 @@ class Request:
     @functools.cached_property
     def query_params(self):
         params = {}
-        for key, value in parse_qsl(self._query, keep_blank_values=True):
+        for key, value in parse_qsl(self._query.decode(), keep_blank_values=True):
             params.setdefault(key, value)
         return params
 
