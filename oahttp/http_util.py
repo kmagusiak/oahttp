@@ -42,7 +42,7 @@ def parse_date_time(val: bytes) -> datetime.datetime:
 
 def guess_mimetype(path_or_bytes: str | memoryview) -> str | None:
     if isinstance(path_or_bytes, str):
-        mime, _encoding = mimetypes.guess_file_type(path_or_bytes)
+        mime, _encoding = mimetypes.guess_type(path_or_bytes)
     else:
         # guess from data
         data = bytes(path_or_bytes[:4096])

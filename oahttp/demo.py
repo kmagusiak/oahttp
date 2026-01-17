@@ -1,10 +1,11 @@
 import asyncio
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 from .request import Request
-from .response import Ok
-from .router import HttpStrategy
+from .response import NotFound, Ok
+from .router import FileDispatcher, HttpStrategy
 
 strategy = HttpStrategy()
 global_pool = ThreadPoolExecutor()
@@ -21,6 +22,12 @@ async def _sleep(request: Request):
 async def _exec():
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(global_pool, lambda: Ok(b'ok\n'))
+
+
+@route('GET', '/static/...')(FileDispatcher(os.path.dirname(__name__.replace('.', '/'))))
+@route('GET', '/static/...')
+async def _(request):
+    return NotFound()
 
 
 @route('*', '/...')

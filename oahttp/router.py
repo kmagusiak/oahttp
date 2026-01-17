@@ -261,7 +261,9 @@ class FileDispatcher(Dispatcher):
         if request.method not in ('GET', 'HEAD'):
             raise MethodNotAllowed(request.method, ['GET', 'HEAD'])
 
-        path = self.root_path / request.target
+        path = self.root_path
+        for part in reversed(request._path_route):
+            path /= part
         fp = None
         try:
             fp = path.open('rb')
@@ -273,7 +275,7 @@ class FileDispatcher(Dispatcher):
                 fp = None  # keep open
             else:
                 body = None
-            return Response(body)
+            return Ok(body)
         finally:
             if fp is not None:
                 fp.close()

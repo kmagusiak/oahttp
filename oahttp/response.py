@@ -313,7 +313,14 @@ class FileBody(ResponseBody):
         loop = asyncio.get_running_loop()
         fd = self.__fd
         fd.seek(0)
-        await loop.sendfile(transport, fd)
+        try:
+            await loop.sendfile(transport, fd)
+        except NotImplementedError:
+            # uvloop does not implement sendfile yet, manual fallback
+            buf = memoryview(bytearray(4096))
+            while count := fd.readinto(buf):
+                await throttle()
+                transport.write(buf[:count])
 
     def __del__(self):
         self.__fd.close()
