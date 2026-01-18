@@ -22,6 +22,10 @@ class ReadBuffer(Buffer):
             array[:bs] = init_bytes
             self.__until = bs
 
+    @property
+    def total_size(self):
+        return len(self.__buffer)
+
     def write_buffer(self, size_hint: int = -1) -> memoryview:
         view = self.__view
         until = self.__until
@@ -64,7 +68,7 @@ class ReadBuffer(Buffer):
         if lf < 0:
             if until != self.__until:
                 raise BufferError("limit reached")
-            self.__pos_line = self.__until - 1
+            self.__pos_line = max(pos, self.__until - 1)
             return None
         self.__pos = self.__pos_line = lf + 1
         cr = lf - 1

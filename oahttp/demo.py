@@ -19,12 +19,22 @@ async def _sleep(request: Request):
 
 
 @route('GET', '/exec')
-async def _exec():
+async def _exec(request):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(global_pool, lambda: Ok(b'ok\n'))
 
 
-@route('GET', '/static/...')(FileDispatcher(os.path.dirname(__name__.replace('.', '/'))))
+@route(['POST', 'PUT'], '/input')
+async def _input(request: Request):
+    await request.body.wait()
+    with request.body.open() as f:
+        nlines = len(f.readlines())
+    return Ok(nlines)
+
+
+route('GET', '/static/...')(FileDispatcher(os.path.dirname(__name__.replace('.', '/'))))
+
+
 @route('GET', '/static/...')
 async def _(request):
     return NotFound()

@@ -14,6 +14,7 @@ from .response import (
     Ok,
     Response,
     ServerErrorResponse,
+    StaticBody,
 )
 from .session import Session
 
@@ -59,12 +60,25 @@ class HttpStrategy:
     def new_connection(self) -> HttpConnection:
         return HttpConnection(self)
 
-    def route(self, method: str, path: str):
+    def make_response(self, request: Request, content):
+        if not content and isinstance(content, (bytes, str, type(None))):
+            return StaticBody(b'')
+        if not isinstance(content, str):
+            # TODO make json response
+            content = str(content)
+        return StaticBody(content.encode())
+
+    def route(self, method: str | list[str], path: str):
+        if isinstance(method, str):
+            method = [method]
+        assert method, "Missing method"
+
         def bind_route(func, /):
             other = func
-            if method != '*':
+            if method != ['*']:
                 md = MethodDispatcher()
-                md.methods[method] = other
+                for m in method:
+                    md.methods[m] = other
                 other = md
 
             self.dispatcher = PathDispatcher.build(self.dispatcher, path, other)

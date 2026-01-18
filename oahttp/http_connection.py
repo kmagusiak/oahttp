@@ -14,6 +14,7 @@ import typing
 from . import _logger, config
 from .base_protocol import ReadBuffer
 from .request import Request
+from .response import ServerErrorResponse
 
 if typing.TYPE_CHECKING:
     from .response import Response
@@ -129,7 +130,7 @@ class HttpConnection(asyncio.BufferedProtocol):
                 return
         try:
             if (
-                expect := request.headers.get(b'expect')
+                (expect := request.headers.get(b'expect'))
                 and request.http_version == b'1.1'
                 and not dispatch.done()
             ):
@@ -139,7 +140,7 @@ class HttpConnection(asyncio.BufferedProtocol):
                     self.abort(ExpecationFailed(f"got: {expect}"))
                     return
                 if expect_body:
-                    ContinueResponse().send_immediately(request, self.transport)
+                    ContinueResponse().send_immediately(request, self.transport.write)
 
             self.__process_task = eager(loop, self._response_callback(dispatch), context=context)
             self.__process_task.add_done_callback(self._prepare_next)
@@ -163,6 +164,8 @@ class HttpConnection(asyncio.BufferedProtocol):
             response = self.strategy.wrap_error(request, ex)
 
         _logger.debug("%s: response ready", self)
+        if isinstance(response, ServerErrorResponse):
+            _logger.error("%s: server error", self, exc_info=response.content)
         transport = self.transport
         await response.send(request, transport, write_throttle)
 
@@ -213,7 +216,7 @@ class HttpConnection(asyncio.BufferedProtocol):
         if task := self.__process_task:
             task.cancel("aborted")
         if response is not None:  # TODO and not already started sending
-            response.send_immediately(self.request, self.transport)
+            response.send_immediately(self.request, self.transport.write)
             self.transport.close()
         else:
             self.transport.abort()

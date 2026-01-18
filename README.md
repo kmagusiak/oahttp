@@ -18,3 +18,14 @@ and protocol upgrade.
 
 ### Out of scope
 This is just the origin server: not a proxy, no CONNECT.
+
+## Running some tests
+
+```bash
+PERF=1 python3 ex_oahttp_demo.py &
+ab -t 3 http://localhost:15555/
+
+# chunked upload
+(for CHUNK in $(seq 10); do echo $CHUNK; sleep 1; done) \
+ | curl -T - http://localhost:15555/input
+```

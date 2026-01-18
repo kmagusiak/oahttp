@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import functools
 import io
@@ -17,7 +18,7 @@ from .session import Session
 if typing.TYPE_CHECKING:
     from .router import HttpStrategy
 
-RE_CHUNK = re.compile(r'(Psize?[0-9A-F])(\s*;\s*%s(\s*=\s*.?+))*')
+RE_CHUNK = re.compile(rb'([0-9A-F]+)(?:\s*;|$)')  # ignoring extensions
 
 
 class HttpSyntaxError(Exception):
@@ -35,6 +36,7 @@ class Request:
         self.headers: dict[bytes, bytes] = {}
         self.body: RequestBody = _EMPTY_BODY
         self.context = contextvars.copy_context()
+        self.cookies: dict[bytes, bytes] = {}
 
     def _receive_data(self, buf: ReadBuffer) -> None:
         if self.ready:
@@ -168,10 +170,6 @@ class Request:
         return MultiValuePreference(self.headers.get(b'accept-encoding'))
 
     @functools.cached_property
-    def cookies(self) -> dict[bytes, bytes]:
-        return {}
-
-    @functools.cached_property
     def user_authentication(self) -> typing.Any:
         return self.strategy.authenticate(self)
 
@@ -192,31 +190,44 @@ class Request:
 class RequestBody:
     _resume_callback = None
     ready: bool
+    _ready: asyncio.Event
     size: int
 
     def receive_data(self, buf: ReadBuffer):
         raise NotImplementedError
 
     def receive_paused(self, resume_callback):
-        assert not self.ready
+        if self.ready:
+            return
         self._resume_callback = resume_callback
 
-    async def wait(self):  # FIXME Awaitable?
-        ...
+    @property
+    def ready(self):
+        return self._ready.is_set()
+
+    async def wait(self):
+        if self.ready:
+            return
+        if self._resume_callback is not None:
+            self._resume_callback()
+            del self._resume_callback
+        await self._ready.wait()
 
     def close(self):
         pass
 
-    def open(self): ...
+    def open(self):
+        return io.BytesIO(self.read())
 
-    def read(self):
-        with self.open() as f:
-            return f.read()
+    def read(self) -> bytes | memoryview:
+        raise NotImplementedError
 
 
 class NoRequestBody(RequestBody):
     ready = True
     size = 0
+    _ready = asyncio.Event()
+    _ready.set()
 
     def __bool__(self):
         return False
@@ -224,47 +235,70 @@ class NoRequestBody(RequestBody):
     def receive_data(self, buf):
         pass
 
+    def read(self):
+        return b''
+
 
 _EMPTY_BODY = NoRequestBody()
 
 
 class ChunkedBodyReceiver(RequestBody):
+    size = -1
+
     def __init__(self):
         self.__length = 0
         self.__reading: typing.Literal['chunk', 'trailer', 'done'] = 'chunk'
-        self.__receiver = BodyFileReceiver(-1, None)
+        self.__expected = 0
+        self.__receiver = BodyFileReceiver(-1)
+        self.trailer: dict[bytes, bytes] = {}
+        self._ready = self.__receiver._ready
+        self.__expect_blank = False
 
     @property
     def ready(self):
         return self.__reading == 'done'
 
-    @property
-    def size(self):
-        return -1
-
     def open(self):
         return self.__receiver.open()
+
+    def read(self):
+        return self.__receiver.read()
+
+    def close(self):
+        self.__receiver.close()
+        return super().close()
 
     def receive_data(self, buf: ReadBuffer):
         MAX_LINE_LENGTH = config.MAX_LINE_LENGTH  # noqa: N806
         while self.__reading == 'chunk':
+            if self.__expected:
+                nbytes = self.__receiver.receive_data_limited(buf, self.__expected)
+                self.__expected -= nbytes
+                self.__length += nbytes
+                self.__expect_blank = True
+                continue
+
             line = buf.read_line(MAX_LINE_LENGTH)
             if line is None:
                 return
+            if self.__expect_blank:
+                if line == b'':
+                    self.__expect_blank = False
+                    continue
+                raise HttpSyntaxError("Expected a line return after chunk")
             m = RE_CHUNK.fullmatch(line)
             if not m:
                 raise HttpSyntaxError("Syntax error in chunk")
 
-            size = m.group(0)
-            # FIXME parse and validate size (hexa)
+            try:
+                size = int(m.group(0), 16)
+            except ValueError as e:
+                raise HttpSyntaxError("Invalid chunk size") from e
             if size:
-                self.__receiver.receive_exactly(buf, size)  # FIXME not implemented yet
-                if buf.read_line(MAX_LINE_LENGTH):
-                    raise HttpSyntaxError("Syntax error in chunk body")
-                self.__length += size
+                assert size > 0
+                self.__expected = size
             else:
                 self.__reading = 'trailer'
-                self.__receiver.remaining = 0
 
         while self.__reading == 'trailer':
             line = buf.read_line(MAX_LINE_LENGTH)
@@ -279,15 +313,16 @@ class ChunkedBodyReceiver(RequestBody):
             self._set_trailer(key, value)
 
         self.__reading = 'done'
+        self.__receiver._ready.set()
 
     def _set_trailer(self, key, value):
-        # ignoring trailers in this implementation
-        pass
+        self.trailer[key] = value
 
 
 class BodyReceiver(RequestBody):
     def __init__(self, expected_size):
         assert expected_size > 0
+        self._ready = asyncio.Event()
         self.size = expected_size
         self.__data = bytearray(expected_size)
         self.__receiving = memoryview(self.__data)
@@ -307,33 +342,57 @@ class BodyReceiver(RequestBody):
             self.__receiving = recv[count:]
         else:
             self.__receiving = None
+            self._ready.set()
+
+    def read(self):
+        assert self.ready, "Not ready"
+        return memoryview(self.__data).toreadonly()
 
 
 class BodyFileReceiver(RequestBody):
     def __init__(self, expected_size):
-        self.size = self.remaining = expected_size
+        self._ready = asyncio.Event()
+        self.size = expected_size
+        if expected_size < 0:
+            self.remaining = 1 << 40
+        else:
+            self.remaining = expected_size
         self.__fd = tempfile.SpooledTemporaryFile()  # noqa: SIM115
 
     def __del__(self):
-        self.__fd.close()
+        if hasattr(self, '__fd'):
+            self.__fd.close()
 
-    @property
-    def ready(self):
-        return self.remaining == 0
+    def close(self):
+        self.__fd.close()
+        return super().close()
 
     def receive_data(self, buf: ReadBuffer):
+        self.receive_data_limited(buf, self.remaining)
+
+    def receive_data_limited(self, buf: ReadBuffer, nbytes: int):
         if self.ready:
-            return
-        view = buf.read(self.remaining)
+            return 0
+        view = buf.read(nbytes)
         self.__fd.write(view)
-        self.remaining -= len(view)
+        nbytes = len(view)
+        if self.remaining > 0:
+            self.remaining -= nbytes
+            if not self.remaining:
+                self._ready.set()
+        return nbytes
+
+    def read(self):
+        assert self.ready
+        self.__fd.seek(0)
+        return self.__fd.read()
 
     def open(self):
         assert self.ready
         fd = self.__fd
         if not fd.name:
             # still in memory, read all
-            fd.seek(0)
-            return io.BytesIO(fd.read())
+            return super().open()
         fd.flush()
-        return os.fdopen(fd.fileno(), 'rb')
+        fd.seek(0)
+        return os.fdopen(os.dup(fd.fileno()), 'rb')

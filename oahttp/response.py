@@ -56,7 +56,7 @@ class Response:
         elif isinstance(content, Buffer):
             self.body = StaticBody(content)
         else:
-            self.body = request.serialize_response(content)
+            self.body = request.strategy.make_response(request, content)
 
     @property
     def ready(self):
@@ -68,13 +68,11 @@ class Response:
         transport.write(self._generate_header())
         await self.body.send(transport, throttle)
 
-    @typing.final
-    def send_immediately(self, request: Request, transport: asyncio.WriteTransport):
-        async def no_wait():
-            pass
-
-        loop = asyncio.get_running_loop()
-        loop.run_until_complete(loop.create_task(self.send(request, transport, no_wait)))
+    def send_immediately(self, request: Request, writer):
+        self._for_request(request)
+        self.body.set_headers(self.headers)
+        writer(self._generate_header())
+        self.body.send_immediately(writer)
 
     def _generate_header(self):
         assert self.http_version
@@ -126,6 +124,7 @@ class GenericResponse(Response):
 
 class ServerErrorResponse(Response):
     status = b'500 Internal Server Error'
+    content: Exception
 
     def __init_subclass__(cls):
         status = cls.status
@@ -269,12 +268,18 @@ class ResponseBody:
     async def send(self, transport: asyncio.WriteTransport, throttle: Callable[[], Coroutine]):
         raise NotImplementedError
 
+    def send_immediately(self, writer):
+        raise NotImplementedError
+
 
 class EmptyResponseBody(ResponseBody):
     def set_headers(self, headers: dict):
         assert b'content-length' not in headers
 
     async def send(self, transport, throttle):
+        pass
+
+    def send_immediately(self, writer):
         pass
 
 
@@ -293,6 +298,9 @@ class StaticBody(ResponseBody):
         if self.__body:
             await throttle()
             transport.write(self.__body)
+
+    def send_immediately(self, writer):
+        writer(self.__body)
 
 
 class FileBody(ResponseBody):
@@ -322,6 +330,13 @@ class FileBody(ResponseBody):
                 await throttle()
                 transport.write(buf[:count])
 
+    def send_immediately(self, writer):
+        fd = self.__fd
+        fd.seek(0)
+        buf = memoryview(bytearray(4096))
+        while count := fd.readinto(buf):
+            writer(buf[:count])
+
     def __del__(self):
         self.__fd.close()
 
@@ -338,6 +353,10 @@ class ChunkedBody(ResponseBody):
         async for data in self.__input:
             assert data, "no data returned by the iterator"
             await throttle()
-            transport.write(len(data).hex())
+            transport.write(hex(len(data))[2:].upper())
             transport.write(b'\r\n')
             transport.write(data)
+            transport.write(b'\r\n')
+
+    def send_immediately(self, writer):
+        raise NotImplementedError("cannot send immediately a chunked response")
