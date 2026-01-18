@@ -7,6 +7,7 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./static:/static:ro
+      - /tmp/websockets/:/var/run/websockets
 
     # linux: direct to host
     # the host_app must be bound to 0.0.0.0
