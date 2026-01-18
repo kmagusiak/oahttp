@@ -23,6 +23,10 @@ Dispatcher = Callable[[Request], Coroutine[typing.Any, typing.Any, Response]]
 NOT_FOUND = NotFound()
 
 
+def _key_prio(t):
+    return -t[0]
+
+
 async def default_dispatcher(request: Request) -> Response:
     if request.method == 'OPTIONS' and request.target == '*':
         response = Ok(None)
@@ -88,8 +92,11 @@ class HttpStrategy:
 
 
 class MergableDispatcher(Dispatcher):
-    def merge(self, other: Dispatcher):
+    def merge(self, other: Dispatcher) -> MergableDispatcher:
         return MutliDispatcher(self, other)
+
+    async def __call__(self, request: Request) -> Response:
+        raise NotImplementedError
 
 
 class MutliDispatcher(MergableDispatcher):
@@ -117,7 +124,7 @@ class MutliDispatcher(MergableDispatcher):
         return MutliDispatcher(dispatcher, other)
 
     def add(self, other, priority=1.0):
-        insort_right(self._dispatchers, (priority, other), key=lambda t: -t[0])
+        insort_right(self._dispatchers, (priority, other), key=_key_prio)
 
     async def __call__(self, request: Request):
         for _p, dispatcher in self._dispatchers:
@@ -136,9 +143,11 @@ class PathDispatcher(MergableDispatcher):
     def merge(self, other):
         if isinstance(other, PathDispatcher):
             for p, f in other.static.items():
-                self.static.setdefault(p, f)
+                if g := self.static.get(p):
+                    f = MutliDispatcher.build(g, f)
+                self.static[p] = f
             for d in other.dynamic:
-                insort_right(self.dynamic, d, key=lambda t: -t[0])
+                insort_right(self.dynamic, d, key=_key_prio)
             other = other.root
             if other is None:
                 return self
@@ -152,7 +161,8 @@ class PathDispatcher(MergableDispatcher):
     def build(dispatcher, path, other):
         path_parts = path.split('/')
         path_parts.reverse()
-        path_parts.pop()  # remove first '/'
+        if path_parts.pop():
+            raise ValueError("path should start with '/'")
         out = other
         while path_parts:
             part = path_parts.pop()
@@ -166,7 +176,7 @@ class PathDispatcher(MergableDispatcher):
                 insort_right(
                     d.dynamic,
                     (priority, part[1:-1], matcher, out),
-                    key=lambda t: -t[0],
+                    key=_key_prio,
                 )
             else:
                 d.static[part] = out
@@ -176,37 +186,36 @@ class PathDispatcher(MergableDispatcher):
     async def __call__(self, request: Request):
         if path_parts := request._path_route:
             part = path_parts.pop()
-            try:
-                if func := self.static.get(part):
-                    response = await func(request)
-                    if response is not NOT_FOUND:
-                        return response
-                if part == '.' or not part:
-                    response = await func(request)
-                    if response is not NOT_FOUND:
-                        return response
-                if part == '..':
-                    return NotFound()  # path traversal, stop
+            if func := self.static.get(part):
+                response = await func(request)
+                if response is not NOT_FOUND:
+                    return response
+            if part == '.' or not part:
+                response = await func(request)
+                if response is not NOT_FOUND:
+                    return response
+            if part == '..':
+                return NotFound()  # path traversal, stop
 
-                for _prio, param_name, matcher, func in self.dynamic:
-                    value = part
-                    if matcher is not None:
-                        value = matcher(value)
-                        if value is None:
-                            continue
-                    old_value = request.path_params.get(param_name)
-                    try:
-                        request.path_params[param_name] = value
-                        response = await func(request)
-                        if response is not NOT_FOUND:
-                            return response
-                    finally:
-                        if old_value is None:
-                            request.path_params.pop(param_name, None)
-                        else:
-                            request.path_params[param_name] = old_value
-            finally:
-                path_parts.append(part)
+            for _prio, param_name, matcher, func in self.dynamic:
+                value = part
+                if matcher is not None:
+                    value = matcher(value)
+                    if value is None:
+                        continue
+                old_value = request.path_params.get(param_name)
+                try:
+                    request.path_params[param_name] = value
+                    response = await func(request)
+                    if response is not NOT_FOUND:
+                        return response
+                finally:
+                    if old_value is None:
+                        request.path_params.pop(param_name, None)
+                    else:
+                        request.path_params[param_name] = old_value
+
+            path_parts.append(part)
         elif func := self.root:
             return await func(request)
         return NOT_FOUND
@@ -256,11 +265,16 @@ class ContentTypeDispatcher(MergableDispatcher):
 
     async def __call__(self, request: Request):
         accept = request.accept
-        # TODO get most acceptable
-        for content_type, func in self.content_types.items():
-            if accept.acceptable(content_type):
-                return await func(request)
-        return NotAcceptable()
+        prio_func = [
+            (priority, func)
+            for content_type, func in self.content_types.items()
+            if (priority := accept.acceptable(content_type))
+        ]
+        if not prio_func:
+            return NotAcceptable()
+        prio_func.sort(key=_key_prio)
+        func = prio_func[0][1]
+        return func(request)
 
 
 class FileDispatcher(Dispatcher):
